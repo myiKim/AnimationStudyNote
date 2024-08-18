@@ -1,3 +1,3 @@
-# List of the Pickle files for VIBE estimation
+# Reference
 
 sampleVIBEvideo : the video provided from https://github.com/mkocabas/VIBE
