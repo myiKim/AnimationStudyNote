@@ -369,7 +369,7 @@ def visualize_skeleton(joint_positions, frame_index=0):
 def main():
     # Load the data
     video_name = 'sampleVIBEvideo'
-    file_path = '../vibe_data/' + video_name + '/vibe_output.pkl'
+    file_path = './vibe_pose/' + video_name + '/vibe_output.pkl'
     data = joblib.load(file_path)
     # Main processing loop
     for person_id, person_data in data.items():
