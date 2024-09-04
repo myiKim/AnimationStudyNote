@@ -13,7 +13,7 @@ from matplotlib.animation import FuncAnimation
 
 ## 1. 데이터 로딩
 
-MOTIONPATH = './postprocess/files/motion.npy' #VS Code로 하려면..관리자 권한으로 실행해야 한다.
+MOTIONPATH = '../files/motion.npy' #VS Code로 하려면..관리자 권한으로 실행해야 한다.
 # os.listdir(MOTIONPATH)
 print(os.getcwd())
 
@@ -246,17 +246,15 @@ def rotation_matrix(axis, theta):
                      [2 * (b*d + a*c), 2 * (c*d - a*b), a*a + d*d - b*b - c*c]])
 
 
-
 def quaternion_fk(joint_angles):
-    # Initialize dictionaries to store positions and orientations
     positions = {}
     orientations = {}
     
     # Initialize the root position and orientation (pelvis)
-    positions['pelvis'] = np.array([0, 0, 0])
-    orientations['pelvis'] = R.from_quat([0, 0, 0, 1])  # Identity quaternion
+    positions['pelvis'] = np.array([0, 0, 0])  # Start at origin
+    orientations['pelvis'] = R.from_euler('xyz', joint_angles[:3])
     
-    angle_index = 0
+    angle_index = 3
     for joint, parent_list in AMPkchain.items():
         if joint == 'pelvis':
             continue
@@ -269,17 +267,17 @@ def quaternion_fk(joint_angles):
         roll, pitch, yaw = joint_angles[angle_index:angle_index+3]
         angle_index += 3
         
-        # Create a quaternion from Euler angles (roll, pitch, yaw)
-        q = R.from_euler('xyz', [roll, pitch, yaw])
+        # Create a rotation object from Euler angles (roll, pitch, yaw)
+        local_rotation = R.from_euler('xyz', [roll, pitch, yaw])
         
-        # Compute the new orientation by multiplying the parent's orientation by the current joint's rotation
-        orientations[joint] = parent_orient * q
+        # Compute the new orientation by applying the local rotation in the parent's coordinate system
+        orientations[joint] = parent_orient * local_rotation
         
         # Define the offset for this joint based on the AMP_bone_lengths
         if joint == 'torso':
-            offset = np.array([0, AMP_bone_lengths['pelvis_to_torso'], 0])
+            offset = np.array([0, 0, AMP_bone_lengths['pelvis_to_torso']])
         elif joint == 'head':
-            offset = np.array([0, AMP_bone_lengths['torso_to_head'], 0])
+            offset = np.array([0, 0, AMP_bone_lengths['torso_to_head']])
         elif 'upper_arm' in joint:
             side = 'left' if 'left' in joint else 'right'
             offset = np.array([AMP_bone_lengths[f'torso_to_{side}_upper_arm'], 0, 0])
@@ -287,10 +285,10 @@ def quaternion_fk(joint_angles):
                 offset[0] = -offset[0]
         elif 'lower_arm' in joint:
             side = 'left' if 'left' in joint else 'right'
-            offset = np.array([0, -AMP_bone_lengths[f'{side}_upper_arm_to_{side}_lower_arm'], 0])
+            offset = np.array([0, 0, -AMP_bone_lengths[f'{side}_upper_arm_to_{side}_lower_arm']])
         elif 'hand' in joint:
             side = 'left' if 'left' in joint else 'right'
-            offset = np.array([0, -AMP_bone_lengths[f'{side}_lower_arm_to_{side}_hand'], 0])
+            offset = np.array([0, 0, -AMP_bone_lengths[f'{side}_lower_arm_to_{side}_hand']])
         elif 'thigh' in joint:
             side = 'left' if 'left' in joint else 'right'
             offset = np.array([AMP_bone_lengths[f'pelvis_to_{side}_thigh'], 0, 0])
@@ -298,15 +296,15 @@ def quaternion_fk(joint_angles):
                 offset[0] = -offset[0]
         elif 'shin' in joint:
             side = 'left' if 'left' in joint else 'right'
-            offset = np.array([0, -AMP_bone_lengths[f'{side}_thigh_to_{side}_shin'], 0])
+            offset = np.array([0, 0, -AMP_bone_lengths[f'{side}_thigh_to_{side}_shin']])
         elif 'foot' in joint:
             side = 'left' if 'left' in joint else 'right'
-            offset = np.array([0, -AMP_bone_lengths[f'{side}_shin_to_{side}_foot'], 0])
+            offset = np.array([0, 0, -AMP_bone_lengths[f'{side}_shin_to_{side}_foot']])
         
-        # Calculate the position of the joint
-        positions[joint] = parent_pos + parent_orient.apply(offset)
+        # Calculate the position of the joint in the global coordinate system
+        local_offset = parent_orient.apply(offset)
+        positions[joint] = parent_pos + local_offset
     
-    # Return the array of positions for the joints
     return np.array([positions[joint] for joint in AMPkchain.keys()])
 
 
@@ -318,20 +316,14 @@ def objective_function(joint_angles, target_positions):
     target_positions: array of target positions for a single frame
     """
     
-
     current_positions = quaternion_fk(joint_angles)
-        
     valid_indices = ~np.isnan(target_positions).any(axis=1)
     error = np.sum((current_positions[valid_indices] - target_positions[valid_indices])**2)
     return error
 
 def inverse_kinematics(target_positions, initial_guess):
-    """
-    Perform inverse kinematics for a single frame.
-    target_positions: array of target positions for a single frame
-    initial_guess: initial guess for joint angles for a single frame
-    """
-    result = minimize(objective_function, initial_guess, args=(target_positions,), method='L-BFGS-B')
+    bounds = [(-np.pi, np.pi)] * len(initial_guess)  # Limit joint angles to [-pi, pi]
+    result = minimize(objective_function, initial_guess, args=(target_positions,), method='L-BFGS-B', bounds=bounds)
     return result.x
 
 
@@ -346,10 +338,6 @@ def preprocess_joint_positions_reduced(positions_raw, joint_indices):
     return positions
 
 def process_T2MGPT_data(frame_data, joint_indices, kinematic_chain):
-    """
-    Process VIBE data for multiple frames.
-    frame_data: dictionary containing VIBE output for multiple frames
-    """
     num_frames = frame_data.shape[0]
     num_joints = len(kinematic_chain)
     
@@ -359,22 +347,44 @@ def process_T2MGPT_data(frame_data, joint_indices, kinematic_chain):
         if i % 15 == 0:
             print(f"Processing frame {i}/{num_frames}")
         
-        joint_positions = np.full((num_joints, 3), np.nan)
-        # joint_positions = np.array([frame_data['joints3d'][i][joint_indices[joint]] for joint in kinematic_chain])
-        # joint_positions = preprocess_joint_positions(joint_positions)
         joint_positions = preprocess_joint_positions_reduced(frame_data[i], joint_indices)
-        for j, joint in enumerate(kinematic_chain):
-            if joint_indices[joint] < len(frame_data[i]):
-                pos = frame_data[i][joint_indices[joint]]
-                if pos is not None and not np.any(np.isnan(pos)):
-                    joint_positions[j] = pos
         
-        initial_guess = np.zeros(num_joints * 3)
+        # Scale the joint positions to match the bone lengths
+        scale_factor = AMP_bone_lengths['pelvis_to_torso'] / np.linalg.norm(joint_positions[1] - joint_positions[0])
+        joint_positions = joint_positions * scale_factor
+        
+        if i == 0:
+            initial_guess = np.zeros(num_joints * 3)
+        else:
+            initial_guess = joint_angles_all[i-1]  # Use previous frame as initial guess
+        
         joint_angles = inverse_kinematics(joint_positions, initial_guess)
         joint_angles_all[i] = joint_angles
     
     return joint_angles_all
 
+# Add a new function to visualize the skeleton
+def visualize_skeleton(joint_angles, frame=0):
+    positions = quaternion_fk(joint_angles[frame])
+    
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    for joint, parents in AMPkchain.items():
+        if parents:
+            parent = parents[0]
+            start = positions[list(AMPkchain.keys()).index(parent)]
+            end = positions[list(AMPkchain.keys()).index(joint)]
+            ax.plot([start[0], end[0]], [start[1], end[1]], [start[2], end[2]], 'bo-')
+    
+    ax.set_xlim(-2, 2)
+    ax.set_ylim(-2, 2)
+    ax.set_zlim(0, 2)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title(f'Frame {frame}')
+    plt.show()
 
 
 #AMP 조인트 개수(15개) 로 축소 한 결과는 잘 나오는지 확인.
@@ -461,11 +471,9 @@ def animate_skeleton(joint_angles, interval=50, save_file=None, kinematic_chain=
     
     if save_file:
         # anim.save(save_file, writer='ffmpeg', fps=30)
-        anim.save('ik_estimated_t2mgpt_to_amp_test01.gif', writer='pillow', fps=30)
+        anim.save('ik_recon_001.gif', writer='pillow', fps=30)
     
     plt.show()
-
-
 
 
 if __name__ == '__main__':
@@ -473,3 +481,5 @@ if __name__ == '__main__':
     print(joint_angles_all.shape, joint_angles_all)
     # After processing the VIBE data and getting joint_angles:
     animate_skeleton(joint_angles_all, interval=50, save_file=True)
+
+
